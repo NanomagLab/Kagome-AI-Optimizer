@@ -1,0 +1,497 @@
+import os
+import re
+import numpy as np
+import pandas as pd
+import tensorflow as tf
+from matplotlib import pyplot as plt
+import matplotlib.ticker as mticker
+
+# Import custom modules
+from CustomLib.EVAE_Modules import *
+from CustomLib.Other_Modules import *
+
+# --- Helper Functions: File Save Management ---
+
+def get_run_suffix(output_directory: str, base_filename_prefix: str, ext: str = ".png") -> str:
+    """
+    Generates a versioned suffix (e.g., '_1', '_2') for output files to prevent overwriting.
+    Checks for existing files with the given prefix and finds the next available number.
+    """
+    if not os.path.exists(output_directory):
+        os.makedirs(output_directory)
+        return "_1"
+        
+    # Regex to find numbered suffixes like '_1.png'
+    regex = re.compile(f"_(\\d+){re.escape(ext)}$")
+    max_suffix_num = 0
+    
+    # Check if a non-suffixed base file exists (e.g., 'filename.png')
+    base_file_exists = any(
+        f.startswith(base_filename_prefix) and not regex.search(f)
+        for f in os.listdir(output_directory)
+    )
+    
+    # Find the highest existing suffix number
+    for filename in os.listdir(output_directory):
+        if filename.startswith(base_filename_prefix):
+            match = regex.search(filename)
+            if match:
+                suffix_num = int(match.group(1))
+                if suffix_num > max_suffix_num:
+                    max_suffix_num = suffix_num
+                    
+    if max_suffix_num == 0 and not base_file_exists:
+        return "_1"
+        
+    return f"_{max_suffix_num + 1}"
+
+
+def apply_suffix(save_path: str, suffix: str) -> str:
+    """Applies the generated suffix to a file path, before the extension."""
+    base, ext = os.path.splitext(save_path)
+    return f"{base}{suffix}{ext}"
+
+
+# --- Enhanced Visualization Helper Functions ---
+
+def plot_energy_distributions_evolution(energy_data_dict, reference_energies, save_path, title_prefix="", deep_search_period=None):
+    """Plots the evolution of energy distributions over multiple cycles against a reference."""
+    num_plots = len(energy_data_dict)
+    if num_plots <= 1:
+        return
+        
+    fig, axes = plt.subplots(nrows=num_plots, ncols=1, figsize=(8, 2.5 * num_plots), sharex=True)
+    if num_plots == 1:
+        axes = [axes]
+        
+    all_energies = np.concatenate(list(energy_data_dict.values()) + [reference_energies])
+    min_bin_range = np.min(all_energies)
+    ref_mean, ref_std = np.mean(reference_energies), np.std(reference_energies)
+    max_bin_range = ref_mean + 3 * ref_std
+    bins = np.linspace(min_bin_range, max_bin_range, 60)
+    
+    sorted_cycles = sorted(energy_data_dict.keys())
+    for i, cycle in enumerate(sorted_cycles):
+        ax = axes[i]
+        energies = energy_data_dict[cycle]
+        ax.hist(reference_energies, bins=bins, color='gray', alpha=0.6, density=True, label='Initial')
+        ax.hist(energies, bins=bins, color='red', alpha=0.7, density=True, edgecolor='white', linewidth=0.5, label=f'Cycle {cycle}')
+        ax.set_ylabel('Density')
+        ax.yaxis.set_major_locator(mticker.MaxNLocator(nbins=3, prune='both'))
+    
+    axes[-1].set_xlabel(r'Energy ($\epsilon$)')
+    plotted_cycles_str = ", ".join(map(str, sorted_cycles))
+    title_str = f'Energy Distribution Evolution: {title_prefix}\n(Cycles: {plotted_cycles_str})'
+    if deep_search_period:
+        title_str += f' - Deep Search @{deep_search_period} cycles'
+        
+    fig.suptitle(title_str, fontsize=14)
+    plt.tight_layout(rect=[0, 0, 1, 0.93])
+    plt.savefig(save_path, dpi=300)
+    print(f"Energy distribution evolution plot saved: {save_path}")
+    plt.close(fig)
+
+
+def plot_minimum_energy_evolution(cycles, min_energies, save_path, title_prefix="", deep_search_period=None):
+    """Plots the minimum energy found in each cycle."""
+    plt.figure(figsize=(12, 7))
+    plt.plot(cycles, min_energies, marker='o', linestyle='-', markersize=4, color='black')
+    
+    title_str = f'Minimum Energy Evolution: {title_prefix}'
+    if deep_search_period:
+        title_str += f'\n(Deep Search every {deep_search_period} cycles)'
+        
+    plt.title(title_str, fontsize=14)
+    plt.xlabel('Cycle')
+    plt.ylabel('Minimum Energy')
+    plt.grid(True, linestyle='--', alpha=0.6)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300)
+    print(f"Minimum energy evolution plot saved: {save_path}")
+    plt.close()
+
+
+def plot_energy_distribution(energy_values, cycle, save_dir, run_suffix):
+    """Plots the energy distribution for a single cycle."""
+    plt.figure(figsize=(10, 6))
+    p1, p99 = np.percentile(energy_values, [1, 99])
+    padding = (p99 - p1) * 0.1
+    x_min_lim, x_max_lim = (p1 - padding, p99 + padding)
+    
+    plt.hist(energy_values, bins=100, color='red', alpha=0.7, edgecolor='white', linewidth=0.5, range=(x_min_lim, x_max_lim))
+    
+    min_energy, max_energy = min(energy_values), max(energy_values)
+    ticks = np.linspace(min_energy, max_energy, 8)
+    tick_labels = [f"{tick:.6f}" for tick in ticks]
+    plt.xticks(ticks, tick_labels, rotation=45, ha="right")
+    
+    plt.title(f"Energy Distribution after Cycle {cycle}")
+    plt.xlabel("Energy")
+    plt.ylabel("Frequency")
+    plt.tight_layout()
+    
+    save_path = os.path.join(save_dir, f"energy_distribution_cycle_{cycle}.png")
+    final_save_path = apply_suffix(save_path, run_suffix)
+    plt.savefig(final_save_path)
+    print(f"Saved cycle energy plot to: {final_save_path}")
+    plt.close()
+
+
+def save_spin_edge_csv(spin3d_list, edges, coes, output_csv: str, run_suffix: str):
+    """Saves spin configurations and edge information to a CSV file."""
+    E = edges.shape[0]
+    for i, sp in enumerate(spin3d_list):
+        if sp.shape != (E, 3):
+            raise ValueError(f"Shape error in spin3d_list[{i}]")
+            
+    spin_dict = {}
+    for idx, sp3d in enumerate(spin3d_list):
+        spin_dict[f"Sx_{idx}"] = sp3d[:, 0]
+        spin_dict[f"Sy_{idx}"] = sp3d[:, 1]
+        spin_dict[f"Sz_{idx}"] = sp3d[:, 2]
+        
+    spin_dict["X1"], spin_dict["Y1"], spin_dict["X2"], spin_dict["Y2"] = edges[:, 0], edges[:, 1], edges[:, 2], edges[:, 3]
+    spin_dict["XC"], spin_dict["YC"] = coes[:, 0], coes[:, 1]
+    
+    df = pd.DataFrame(spin_dict)
+    df.insert(0, "Index", np.arange(len(df)))
+    
+    final_output_csv = apply_suffix(output_csv, run_suffix)
+    df.to_csv(final_output_csv, index=False, float_format='%.6f')
+    print(f"Saved spin and edge data to CSV: {final_output_csv}")
+
+
+# --- Main Logic ---
+
+# 1. GPU Configuration
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+gpus = tf.config.experimental.list_physical_devices("GPU")
+if gpus:
+    try:
+        tf.config.experimental.set_memory_growth(gpus[0], True)
+    except RuntimeError as e:
+        print(f"GPU Memory Growth Error: {e}")
+
+# 2. VAE Model Hyperparameters
+batch_size = 500
+encoder_hidden_units = [512, 384, 256]
+decoder_hidden_units = [256, 384, 512]
+encoding_dim = 128
+use_batch_norm = True
+learning_rate = 1e-3
+beta_kl = 0.005  # Weight for the KL divergence term
+gamma_energy = 0 # Weight for the physical energy term in VAE loss
+
+# 3. Dataset and Physics Parameters
+dataset_dir_name = "Kagome_552_DR1000.00"
+dataset_dir_path = os.path.join(os.getcwd(), "D", dataset_dir_name)
+dip = 1.0
+dipRange = float(dataset_dir_name.split('DR')[-1])
+print(f"Dipolar Constant (dip): {dip}, Dipolar Range (dipRange): {dipRange}")
+
+# 4. Data Loading
+x_train_initial_3d = np.load(os.path.join(dataset_dir_path, "TrainData.npy"))[:30000]
+edges = np.load(os.path.join(dataset_dir_path, "Edges.npy"))
+coes = np.load(os.path.join(dataset_dir_path, "CenterOfEdges.npy"))
+rotmat = np.load(os.path.join(dataset_dir_path, "Rotmat.npy"))
+nnidx = np.load(os.path.join(dataset_dir_path, "NNIndices.npy")) if dipRange == 0.0 else None
+nbofspins = x_train_initial_3d.shape[1]
+print(f"Dataset imported. Number of spins = {nbofspins}")
+
+# 5. Setup Output Directory and Run Suffix
+os.makedirs(dataset_dir_name, exist_ok=True)
+run_suffix = get_run_suffix(dataset_dir_name, "energy_distribution_cycle")
+print(f"Using run suffix for this execution: '{run_suffix}'")
+
+# 6. Preprocess Data
+x_train = spin2binary(x_train_initial_3d, rotmat)
+x_train1 = x_train.reshape(-1, nbofspins)
+print("Binarized training data prepared. Shape:", x_train1.shape)
+
+# 7. VAE Model Definition
+# Encoder
+encoder_inputs = tf.keras.Input(shape=(nbofspins,))
+x = encoder_inputs
+for units in encoder_hidden_units:
+    x = tf.keras.layers.Dense(units)(x)
+    if use_batch_norm:
+        x = tf.keras.layers.BatchNormalization()(x)
+    x = tf.keras.layers.LeakyReLU()(x)
+z_mean = tf.keras.layers.Dense(encoding_dim, name="z_mean")(x)
+z_log_var = tf.keras.layers.Dense(encoding_dim, name="z_log_var")(x)
+
+# Sampling Layer
+class Sampling(tf.keras.layers.Layer):
+    """Reparameterization trick: uses z_mean and z_log_var to sample z."""
+    def call(self, inputs):
+        z_mean, z_log_var = inputs
+        batch = tf.shape(z_mean)[0]
+        dim = tf.shape(z_mean)[1]
+        epsilon = tf.keras.backend.random_normal(shape=(batch, dim))
+        return z_mean + tf.exp(0.5 * z_log_var) * epsilon
+
+z = Sampling()([z_mean, z_log_var])
+encoder = tf.keras.Model(encoder_inputs, [z_mean, z_log_var, z], name="encoder")
+
+# Decoder
+latent_inputs = tf.keras.Input(shape=(encoding_dim,))
+x = latent_inputs
+for units in decoder_hidden_units:
+    x = tf.keras.layers.Dense(units)(x)
+    if use_batch_norm:
+        x = tf.keras.layers.BatchNormalization()(x)
+    x = tf.keras.layers.LeakyReLU()(x)
+decoder_outputs = tf.keras.layers.Dense(nbofspins, activation='tanh')(x)
+decoder = tf.keras.Model(latent_inputs, decoder_outputs, name="decoder")
+
+# VAE Model Class
+class VAE(tf.keras.Model):
+    def __init__(self, encoder, decoder, beta=1.0, gamma=1.0, rcloss_type="mse", **kwargs):
+        super(VAE, self).__init__(**kwargs)
+        self.encoder = encoder
+        self.decoder = decoder
+        self.beta = beta
+        self.gamma = gamma
+        self.rcloss_type = rcloss_type
+        # Loss trackers
+        self.total_loss_tracker = tf.keras.metrics.Mean(name="loss")
+        self.recon_loss_tracker = tf.keras.metrics.Mean(name="recon_loss")
+        self.kl_loss_tracker = tf.keras.metrics.Mean(name="kl_loss")
+        self.energy_loss_tracker = tf.keras.metrics.Mean(name="energy_loss")
+        self.dip_energy_tracker = tf.keras.metrics.Mean(name="dip_energy")
+        self.j_energy_tracker = tf.keras.metrics.Mean(name="j_energy")
+
+    @property
+    def metrics(self):
+        return [self.total_loss_tracker, self.recon_loss_tracker, self.kl_loss_tracker, 
+                self.energy_loss_tracker, self.dip_energy_tracker, self.j_energy_tracker]
+
+    def train_step(self, data):
+        with tf.GradientTape() as tape:
+            z_mean, z_log_var, z = self.encoder(data)
+            reconstruction = self.decoder(z)
+
+            # Reconstruction Loss
+            if self.rcloss_type == "mse":
+                recon_loss = get_mse_rcloss(data, reconstruction)
+            else:
+                recon_loss = get_bc_rcloss(data, reconstruction)
+
+            # KL Divergence
+            kl_loss = -0.5 * tf.reduce_mean(
+                tf.reduce_sum(1 + z_log_var - tf.square(z_mean) - tf.exp(z_log_var), axis=1)
+            )
+
+            # Physical Energy Loss (Hamiltonian)
+            dipEnergy, hmloss = get_hmloss(reconstruction, rotmat, dip, dipBasis)
+            jEnergy = get_hmJloss_kagome(reconstruction, edges)
+            energy_loss = jEnergy + hmloss
+
+            # Total Loss
+            total_loss = tf.reduce_mean(recon_loss) + self.beta * kl_loss + self.gamma * energy_loss
+
+        grads = tape.gradient(total_loss, self.trainable_weights)
+        self.optimizer.apply_gradients(zip(grads, self.trainable_weights))
+
+        # Update trackers
+        self.total_loss_tracker.update_state(total_loss)
+        self.recon_loss_tracker.update_state(tf.reduce_mean(recon_loss))
+        self.kl_loss_tracker.update_state(kl_loss)
+        self.energy_loss_tracker.update_state(energy_loss)
+        self.dip_energy_tracker.update_state(dipEnergy)
+        self.j_energy_tracker.update_state(jEnergy)
+
+        return {m.name: m.result() for m in self.metrics}
+
+
+# 8. Initialize and Compile VAE
+vae = VAE(encoder, decoder, beta=beta_kl, gamma=gamma_energy, rcloss_type="mse")
+vae.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate))
+early_stopping = tf.keras.callbacks.EarlyStopping(monitor='loss', patience=10, verbose=1)
+
+# 9. Calculate Initial Energy and Define Fitness Function
+dipBasis = get_dipbasis(coes, dipRange, nnidx)
+initial_energy, _ = get_hmloss(x_train, rotmat, dip, dipBasis)
+initial_energy_np = initial_energy.numpy()
+def fitness_func(latent_code):
+    """Fitness function for GA: negative of the total dipolar energy."""
+    decoded_spins = vae.decoder(latent_code)
+    energy, _ = get_hmloss(decoded_spins, rotmat, dip, dipBasis)
+    return -energy
+
+
+# --- Main Optimization Loop ---
+num_cycles = 200
+deep_search_period = 20
+evolution_plot_period = 10
+min_energy_plot_period = 20
+num_elite_to_keep = 50
+num_best_to_save_csv = 1
+
+min_energy_tracker = [np.min(initial_energy_np)]
+evolution_energy_data = {0: initial_energy_np}
+
+for cycle in range(num_cycles):
+    is_deep_search_cycle = (cycle + 1) % deep_search_period == 0
+    if is_deep_search_cycle:
+        ga_iterations, initial_mutation_rate, final_mutation_rate = 20000, 1.0, 0.01
+        print(f"\n>>> Starting Deep Search Cycle {cycle + 1} ({ga_iterations} iterations) <<<")
+    else:
+        ga_iterations, initial_mutation_rate, final_mutation_rate = 2000, 1.0, 1.0
+        print(f"\n--- Starting Training Cycle {cycle + 1}/{num_cycles} ---")
+
+    # --- Stage 1: Train VAE on the current dataset ---
+    vae.fit(x_train1, epochs=100, batch_size=batch_size, callbacks=[early_stopping], verbose=2)
+    print(f"Cycle {cycle + 1}: VAE training complete.")
+
+    # --- Feature: Save energy distribution from the learned prior p(z) ---
+    print(f"Calculating energy distribution from the prior p(z) for cycle {cycle + 1}...")
+    pz_energy_dir = os.path.join(dataset_dir_name, "pz_energy_snapshots")
+    os.makedirs(pz_energy_dir, exist_ok=True)
+    pz_energy_save_path = os.path.join(pz_energy_dir, f"pz_energy_cycle_{cycle + 1}.npy")
+    final_pz_energy_path = apply_suffix(pz_energy_save_path, run_suffix)
+    random_latent_vectors = tf.random.normal(shape=(10000, encoding_dim))
+    generated_spins_from_prior = vae.decoder(random_latent_vectors)
+    # Binarize spins before calculating energy
+    generated_spins_binary = tf.where(generated_spins_from_prior > 0, 1.0, -1.0)
+    pz_energies, _ = get_hmloss(generated_spins_binary, rotmat, dip, dipBasis)
+    np.save(final_pz_energy_path, pz_energies.numpy())
+    print(f"Saved p(z) energy distribution to: {final_pz_energy_path}")
+
+    # --- Stage 2: Explore latent space with Genetic Algorithm ---
+    ga = GeneticAlgorithm3(
+        fitness_func,
+        save_dir=os.path.join(dataset_dir_name, f"ga_cycle_{cycle}"),
+        dim=encoding_dim,
+        num_samples=5000,
+        num_elite=0,
+        probability_method="linear",
+        selection_method="stochastic_remainder_selection",
+        crossover_method="rank_based_adaptive",
+        mutation_method="rank_based_adaptive",
+        k1=0.5
+    )
+    optimized_latent_codes_ga = ga.run(
+        generator=vae.decoder,
+        total_iteration=ga_iterations,
+        sub_iteration=100,
+        dataset_dir_name=dataset_dir_name,
+        rotmat=rotmat, dip=dip, dipBasis=dipBasis, edges=edges, coes=coes,
+        get_hmtotalloss=get_hmloss,
+        save_spin_edge_csv=lambda *args: save_spin_edge_csv(*args, run_suffix=run_suffix),
+        initial_mutation_rate=initial_mutation_rate,
+        final_mutation_rate=final_mutation_rate
+    )
+    
+    # Extract elite states from GA results
+    ga_generated_spins = vae.decoder(optimized_latent_codes_ga)
+    ga_generated_spins_binary = tf.where(ga_generated_spins > 0, 1.0, -1.0)
+    ga_energies, _ = get_hmloss(ga_generated_spins_binary, rotmat, dip, dipBasis)
+    ga_energies_np = ga_energies.numpy()
+    elite_indices = np.argsort(ga_energies_np)[:num_elite_to_keep]
+    rl_start_points = tf.gather(optimized_latent_codes_ga, elite_indices)
+    print(f"Extracted {len(rl_start_points)} elite states from GA.")
+    print(f"Best energy found by GA: {ga_energies_np[elite_indices[0]]:.6f}")
+
+    # --- Stage 3: Refine elite states with Reinforcement Learning ---
+    print(f"\n--- Cycle {cycle + 1}: Stage 3 - Refinement with Reinforcement Learning ---")
+    rl_agent = PPOAgent(
+        fitness_func=fitness_func,
+        decoder=vae.decoder,
+        dim=encoding_dim,
+        population_size=num_elite_to_keep,
+        steps_per_rollout=32
+    )
+    # Run RL using the elites found by GA as initial states
+    optimized_latent_codes_final = rl_agent.run(
+        total_iteration=50030, # Example: grant RL a similar search budget
+        initial_states=rl_start_points
+    )
+
+    # --- Stage 4: Analyze final results and update dataset ---
+    final_generated_spins = vae.decoder(optimized_latent_codes_final)
+    final_spins_binary = tf.where(final_generated_spins > 0, 1.0, -1.0)
+    final_energies, _ = get_hmloss(final_spins_binary, rotmat, dip, dipBasis)
+    final_energies_np = final_energies.numpy()
+
+    # Save energy distribution of the final elite configurations
+    energy_dist_save_path = os.path.join(dataset_dir_name, f"energy_distribution_values_cycle_{cycle + 1}.npy")
+    final_energy_dist_path = apply_suffix(energy_dist_save_path, run_suffix)
+    np.save(final_energy_dist_path, final_energies_np)
+    print(f"Saved final elite energy distribution to: {final_energy_dist_path}")
+
+    # Track and plot minimum energy
+    min_energy_this_cycle = np.min(final_energies_np)
+    min_energy_tracker.append(min_energy_this_cycle)
+    print(f"Cycle {cycle + 1} Final Results - Mean E: {np.mean(final_energies_np):.6f}, Min E: {min_energy_this_cycle:.6f}")
+    plot_energy_distribution(final_energies_np, cycle + 1, dataset_dir_name, run_suffix)
+
+    # Log detailed information about the lowest energy states
+    def find_lowest_info(arr, n):
+        n_eff = min(n, len(arr))
+        if n_eff == 0: return np.array([]), np.array([], dtype=int)
+        indices = np.argpartition(arr, n_eff - 1)[:n_eff]
+        return arr[indices], indices
+        
+    lowest_energies, lowest_indices = find_lowest_info(final_energies_np, num_elite_to_keep)
+    print(f"{len(lowest_energies)} lowest energies: {lowest_energies}")
+    print(f"Indices of the {len(lowest_indices)} lowest energies: {lowest_indices}")
+    energy_counts = {e: np.sum(lowest_energies == e) for e in np.unique(lowest_energies)}
+    print("Count of configurations per energy value:", energy_counts)
+
+    # Periodically plot evolution graphs
+    is_evolution_plot_cycle = (cycle + 1) % evolution_plot_period == 0
+    if is_evolution_plot_cycle or (cycle + 1) == num_cycles:
+        evolution_energy_data[cycle + 1] = final_energies_np
+        dist_plot_path = os.path.join(dataset_dir_name, f"energy_distribution_evolution_at_cycle{cycle + 1}.png")
+        plot_energy_distributions_evolution(
+            energy_data_dict=evolution_energy_data,
+            reference_energies=initial_energy_np,
+            save_path=apply_suffix(dist_plot_path, run_suffix),
+            title_prefix=dataset_dir_name,
+            deep_search_period=deep_search_period
+        )
+
+    is_min_energy_plot_cycle = (cycle + 1) % min_energy_plot_period == 0
+    if is_min_energy_plot_cycle or (cycle + 1) == num_cycles:
+        min_e_plot_path = os.path.join(dataset_dir_name, f"minimum_energy_evolution_at_cycle{cycle + 1}.png")
+        plot_minimum_energy_evolution(
+            cycles=list(range(cycle + 2)),
+            min_energies=min_energy_tracker,
+            save_path=apply_suffix(min_e_plot_path, run_suffix),
+            title_prefix=dataset_dir_name,
+            deep_search_period=deep_search_period
+        )
+        min_e_array_path = os.path.join(dataset_dir_name, f"minimum_energies_at_cycle{cycle + 1}.npy")
+        final_min_e_array_path_suffixed = apply_suffix(min_e_array_path, run_suffix)
+        np.save(final_min_e_array_path_suffixed, np.array(min_energy_tracker))
+        print(f"Intermediate minimum energy data array saved: {final_min_e_array_path_suffixed}")
+
+    # --- Stage 5: Update the training dataset for the next cycle ---
+    x_train_selected_elites = tf.gather(final_spins_binary, lowest_indices, axis=0)
+
+    # Save the best spin configuration to CSV
+    if num_best_to_save_csv > 0 and x_train_selected_elites.shape[0] > 0:
+        best_spin_binary = x_train_selected_elites[0]
+        best_spin_3d = binary2spin(best_spin_binary[tf.newaxis, ...], rotmat)[0]
+        traincsv_dir_name = "train_csv"
+        os.makedirs(traincsv_dir_name, exist_ok=True)
+        output_csv_path = os.path.join(traincsv_dir_name, f"train_{dataset_dir_name}_cycle{cycle + 1}.csv")
+        save_spin_edge_csv([best_spin_3d, best_spin_3d, best_spin_3d], edges, coes, output_csv_path, run_suffix)
+
+    # Add the newly found elite states to the training data
+    num_to_add = x_train_selected_elites.shape[0]
+    if num_to_add > 0:
+        x_train1 = np.concatenate((x_train1, x_train_selected_elites.numpy()), axis=0)
+        np.random.shuffle(x_train1)
+
+    # --- Feature: Save a snapshot of the updated training data ---
+    snapshot_dir = os.path.join(dataset_dir_name, "training_data_snapshots")
+    os.makedirs(snapshot_dir, exist_ok=True)
+    snapshot_filename = f"training_data_cycle_{cycle + 1}.npy"
+    snapshot_save_path = os.path.join(snapshot_dir, snapshot_filename)
+    final_snapshot_path = apply_suffix(snapshot_save_path, run_suffix)
+    np.save(final_snapshot_path, x_train1)
+    print(f"Saved training data snapshot to: {final_snapshot_path}")
+
+print("\nAll cycles complete.")
