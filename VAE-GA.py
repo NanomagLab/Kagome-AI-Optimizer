@@ -298,32 +298,49 @@ def fitness_func(latentcode):
 
 
 # --- Main Optimization Loop ---
-num_cycles = 2
-deep_search_period = 2
-evolution_plot_period = 1
+# ==============================================================================
+# Main loop control parameters
+# ==============================================================================
+# Total number of VAE-GA cycles to run.
+num_cycles = 40
+# Interval for running an intensive GA search (deep search) instead of a standard one.
+# A deep search runs for more generations to explore the landscape more thoroughly.
+deep_search_period = 20
+# Interval for saving intermediate plots for monitoring.
+evolution_plot_period = 10
 min_energy_plot_period = 20
+# Number of the best (lowest energy) configurations from the GA output to be
+# added back into the training dataset for the next VAE retraining cycle.
 num_lowest_energies = 50
-num_csv_save = 1
-
-min_energy_tracker = [np.min(initial_energy_np)]
-evolution_energy_data = {0: initial_energy_np}
+# ==============================================================================
 
 for cycle in range(num_cycles):
     is_deep_search_cycle = (cycle + 1) % deep_search_period == 0
     if is_deep_search_cycle:
-        total_iteration, initial_mutation_rate, final_mutation_rate = 1000, 1.0, 0.01
+        # Parameters for a deep search cycle
+        total_iteration, initial_mutation_rate, final_mutation_rate = 10000, 1.0, 0.01
         print(f"\n>>> Starting Deep Search Cycle {cycle + 1} ({total_iteration} iterations) <<<")
     else:
+        # Parameters for a standard search cycle
         total_iteration, initial_mutation_rate, final_mutation_rate = 1000, 1.0, 1.0
         print(f"\n--- Starting Standard Cycle {cycle + 1}/{num_cycles} ---")
 
-    vae.fit(x_train1, epochs=100, batch_size=batch_size, callbacks=[early_stopping], verbose=2)
-    print(f"Cycle {cycle + 1}: VAE training complete.")
-
-    ga = GeneticAlgorithm3(fitness_func, save_dir=os.path.join(dataset_dir_name, f"ga_cycle_{cycle}"), dim=128,
-                           num_samples=500, num_elite=0, probability_method="linear",
-                           selection_method="stochastic_remainder_selection", crossover_method="rank_based_adaptive",
-                           mutation_method="rank_based_adaptive", k1=0.5)
+    # ==============================================================================
+    # Genetic Algorithm hyperparameters
+    # ==============================================================================
+    ga = GeneticAlgorithm3(
+        fitness_func,
+        save_dir=os.path.join(dataset_dir_name, f"ga_cycle_{cycle}"),
+        dim=128,          # Dimension of the latent space (must match VAE's encoding_dim)
+        num_samples=5000, # Population size for the GA
+        num_elite=0,      # Elitism: Number of best individuals to pass directly to the next generation. 0 means no elitism.
+        probability_method="linear", # Method for assigning selection probabilities based on rank
+        selection_method="stochastic_remainder_selection", # Parent selection method
+        crossover_method="rank_based_adaptive", # Crossover operator
+        mutation_method="rank_based_adaptive",  # Mutation operator
+        k1=0.5            # A parameter likely used by the adaptive methods
+    )
+    # ==============================================================================
     optimized_latent_codes = ga.run(generator=vae.decoder, total_iteration=total_iteration, sub_iteration=100,
                                     dataset_dir_name=dataset_dir_name, rotmat=rotmat, dip=dip, dipBasis=dipBasis,
                                     edges=edges, coes=coes, get_hmtotalloss=get_hmloss,
