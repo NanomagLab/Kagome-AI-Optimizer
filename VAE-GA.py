@@ -322,7 +322,7 @@ for cycle in range(num_cycles):
 
     # --- *** 기능 추가 끝 *** ---
     ga = GeneticAlgorithm3(fitness_func, save_dir=os.path.join(dataset_dir_name, f"ga_cycle_{cycle}"), dim=128,
-                           num_samples=500, num_elite=0, probability_method="linear",
+                           num_samples=5000, num_elite=0, probability_method="linear",
                            selection_method="stochastic_remainder_selection", crossover_method="rank_based_adaptive",
                            mutation_method="rank_based_adaptive", k1=0.5)
     optimized_latent_codes = ga.run(generator=vae.decoder, total_iteration=total_iteration, sub_iteration=100,
