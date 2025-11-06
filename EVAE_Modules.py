@@ -2,7 +2,7 @@ import os
 import numpy as np
 import tensorflow as tf
 import tensorflow.keras.backend as K
-from CustomLib.Other_Modules import get_best_model_path, get_dipbasis
+from Other_Modules import get_best_model_path, get_dipbasis
 
 def get_callbacks(save_path, save_best_only=True, save_weights_only=False, period=1):
     return tf.keras.callbacks.ModelCheckpoint(save_path, save_best_only=save_best_only, save_weights_only=save_weights_only, period=period)
